@@ -193,7 +193,7 @@ var Podify = (function() {
     logAction('Converting Template', baseFileName, sourceFile, newFileName);
 
     if(confirmAction()){
-      return fs.rename(templatePath, newFileName);
+      return fs.rename(sourceFile, newFileName);
     } else{
       log('Skipped: '.bold, sourceFile.bold);
       return promise();
