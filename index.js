@@ -6,7 +6,8 @@ var imports = {
   fs : require('promised-io/fs'),
   groupPromises : require('promised-io/promise').all,
   path : require('path'),
-  readlineSync : require('readline-sync')
+  readlineSync : require('readline-sync'),
+  inflection : require('inflection')
 };
 
 var _confirmActions = true;
@@ -47,6 +48,9 @@ function setup() {
     _podPrefix = 'pods';
   }
   console.log('Pod Prefix: '.bold, _podPrefix.blue);
+
+  console.log(' ');
+  console.log(' ');
 }
 
 function run() {
@@ -58,18 +62,18 @@ var Podify = (function() {
 
   var log = console.log;
 
-  function isJSFile(fileName) {
-    return fileName.indexOf('.js') > -1;
-  };
-
-  function isHBSFile(fileName){
-    return fileName.indexOf('.hbs') > -1;
+  function isSourceFile(fileName) {
+    return fileName.indexOf('.js') > -1 || fileName.indexOf('.hbs') > -1;
   }
 
   function promise(value) {
     var deferred = new imports.Deferred();
     deferred.resolve(value);
     return deferred.promise;
+  }
+
+  function getBaseDirname(filePath) {
+    return filePath.split(imports.path.sep).pop();
   }
 
   function confirmAction() {
@@ -96,19 +100,43 @@ var Podify = (function() {
     log(" ");
   }
 
-  function componentJSFileConverter(filePath) {
+  function renameFile(filePath, newFileName) {
+    return imports.fs.rename(filePath, newFileName).then(function() {
+      log('Converted: ', filePath);
+    }, function(error) {
+      if(error.code === 'ENOENT') {
+        log('Skipping ' + filePath + ' as it does not belong to a resource');
+        return;
+      }
+    });
+  }
+
+  function childLevelFileConverter(filePath) {
     var fs = imports.fs;
     var path = imports.path;
 
-    var baseFileName = path.basename(filePath, '.js');
-    var folderName = path.dirname(filePath);
-    var newFileName = folderName + '/'+baseFileName + '/component.js';
+    var fileExtension = path.extname(filePath);
+    var dirname = path.dirname(filePath);
+    var basedirname = getBaseDirname(dirname);
+    var parentDirectory = path.dirname(path.resolve(filePath, '../'));
+    var fileType = imports.inflection.singularize(getBaseDirname(parentDirectory));
+    var baseFileName = path.basename(filePath, fileExtension);
+    var destinationDir = path.resolve(dirname, '../../' + _podPrefix) + '/' + basedirname + '/' + baseFileName;
+    var newFileName = destinationDir + '/' + fileType + fileExtension;
 
-    logAction('Converting Component', baseFileName, filePath, newFileName);
+    logAction('Converting Child ' + fileType, baseFileName, filePath, newFileName);
 
     if(confirmAction()){
-      return fs.mkdir(baseFileName).
+      return fs.mkdir(destinationDir).
         then(function() {
+          log('Converted: ', filePath);
+          return fs.rename(filePath, newFileName);
+        }, function(error) {
+          if(error.code !== 'EEXIST'){
+            log(error);
+          }
+
+          log('Converted: ', filePath);
           return fs.rename(filePath, newFileName);
         });
     } else {
@@ -117,57 +145,57 @@ var Podify = (function() {
     }
   }
 
-  function routeJSFileConverter(filePath) {
+  function rootLevelFileConverter(filePath) {
     var fs = imports.fs;
     var path = imports.path;
 
-    var baseFileName = path.basename(filePath, '.js');
-    var sourceFile = path.resolve() + '/app/routes/' + filePath;
-    var podDirectoryPath = path.resolve(filePath, '../app/'+_podPrefix+'/') + '/' + baseFileName;
-    var newFileName = podDirectoryPath + '/route.js';
+    var fileExtension = path.extname(filePath);
+    var dirname = path.dirname(filePath);
+    var basedirname = getBaseDirname(dirname);
+    var singularizedDirname = imports.inflection.singularize(basedirname);
+    var baseFileName = path.basename(filePath, fileExtension);
+    var destinationDir;
 
-    logAction('Converting Route', baseFileName, sourceFile, newFileName);
+    if(singularizedDirname === 'component'){
+      destinationDir = path.resolve(dirname, '../' + _podPrefix) + '/components/' + baseFileName;
+    } else {
+      destinationDir = path.resolve(dirname, '../' + _podPrefix) + '/' + baseFileName;
+    }
+
+    var newFileName = destinationDir + '/' + singularizedDirname + fileExtension;
+
+    logAction('Converting ' + singularizedDirname, baseFileName, filePath, newFileName);
 
     if(confirmAction()){
-      return fs.mkdir(podDirectoryPath).
+      var returnPromise = promise();
+      if(['route', 'controller', 'component'].indexOf(singularizedDirname) > -1){
+        returnPromise = fs.mkdir(destinationDir);
+      }
+      return returnPromise.
         then(function() {
-          return fs.rename(filePath, newFileName);
+          return renameFile(filePath, newFileName);
+        }, function(error) {
+          if(error.code !== 'EEXIST'){
+            log(error);
+          }
+          return renameFile(filePath, newFileName);
         });
     } else {
-      log('Skipped: '.bold, sourceFile.bold);
+      log('Skipped: '.bold, filePath.bold);
       return promise();
     }
   }
 
-  function controllerJSFileConverter(filePath) {
-    var fs = imports.fs;
-    var path = imports.path;
-
-    var baseFileName = path.basename(filePath, '.js');
-    var sourceFile = path.resolve() + '/app/controllers/' + filePath;
-    var podDirectoryPath = path.resolve(filePath, '../app/'+_podPrefix+'/') + '/' + baseFileName;
-    var newFileName = podDirectoryPath + '/controller.js';
-
-    logAction('Converting Controller', baseFileName, sourceFile, newFileName);
-
-    if(confirmAction()){
-      return fs.mkdir(podDirectoryPath).
-        then(function() {
-          return fs.rename(filePath, newFileName);
-        });
-    } else {
-      log('Skipped: '.bold, sourceFile.bold);
-      return promise();
-    }
-  }
-
-  function convertJSFiles(directory, converter) {
+  function convertFiles(directory, converter) {
 
     return imports.fs.readdir(directory).
       then(function(files) {
         var promises = [];
-        var jsFiles = files.filter(isJSFile);
-        jsFiles.forEach(function(file) {
+        files.filter(isSourceFile).
+        map(function(file) {
+          return imports.path.join(directory, file);
+        }).
+        forEach(function(file) {
           promises.push(converter(file));
         });
         return imports.groupPromises(promises);
@@ -176,21 +204,15 @@ var Podify = (function() {
       });
   }
 
-  function templateConverter(filePath, isComponent) {
+  function componentTemplateConverter(filePath) {
     var fs = imports.fs;
     var path = imports.path;
 
     var baseFileName = path.basename(filePath, '.hbs');
+    var newFileName = path.resolve() + '/app/components/' + baseFileName + '/template.hbs';
+    var sourceFile = path.resolve() + '/app/templates/components/' + filePath;
 
-    if(isComponent){
-      var newFileName = path.resolve() + '/app/components/'+baseFileName+'/template.hbs';
-      var sourceFile = path.resolve() + '/app/templates/components/' + filePath;
-    } else{
-      var newFileName = path.resolve() + '/app/'+_podPrefix+'/'+baseFileName+'/template.hbs';
-      var sourceFile = path.resolve() + '/app/templates/' + filePath;
-    }
-
-    logAction('Converting Template', baseFileName, sourceFile, newFileName);
+    logAction('Converting Component Template', baseFileName, sourceFile, newFileName);
 
     if(confirmAction()){
       return fs.rename(sourceFile, newFileName);
@@ -200,20 +222,41 @@ var Podify = (function() {
     }
   }
 
-  function convertTemplatesFiles(directory, isComponent) {
-
+  function convertComponentTemplatesFiles(directory) {
     return imports.fs.readdir(directory).
       then(function(files) {
         var promises = [];
-        var hbsFiles = files.filter(isHBSFile);
-        hbsFiles.forEach(function(file) {
-          promises.push(templateConverter(file, isComponent));
+        files.filter(isSourceFile).
+        forEach(function(file) {
+          promises.push(componentTemplateConverter(file));
         });
         return imports.groupPromises(promises);
       }, function(error) {
         log('No template directory found for components. Moving on...'.blue);
         return promise();
       });
+  }
+
+  function convertSubDirectory(parentDirectory) {
+    var deferred = new imports.Deferred();
+
+    imports.dir.subdirs(parentDirectory, function(error, directories) {
+      if(error){ throw error; }
+
+      var promises = [];
+
+      directories.forEach(function(directory) {
+        promises.push(convertFiles(directory, childLevelFileConverter));
+      });
+
+      imports.groupPromises(promises).then(function() {
+        deferred.resolve();
+      }, function(error){
+        throw error;
+      });
+    });
+
+    return deferred.promise;
   }
 
   function Podify(dirname, podPrefix) {
@@ -224,11 +267,19 @@ var Podify = (function() {
   Podify.prototype.run = function() {
     return this.makePodDirectory().
       then(this.convertComponentsToPods.bind(this)).
-      then(this.convertRoutesToPods.bind(this));
+      then(this.convertRoutesToPods.bind(this)).
+      then(this.convertSubRoutesToPods.bind(this));
   };
 
   Podify.prototype.makePodDirectory = function() {
-    return imports.fs.mkdir('app/'+_podPrefix);
+    return imports.fs.mkdir('app/' + _podPrefix).then(function() {
+      log('Created Pod Directory'.blue);
+    }, function(error) {
+      if(error.code !== 'EEXIST'){
+        log(error);
+      }
+      log('Cool, looks like we have a pod directory already, no need to create one. Moving on...'.blue);
+    });
   };
 
   Podify.prototype.convertComponentsToPods = function() {
@@ -238,9 +289,9 @@ var Podify = (function() {
 
     var componentDirectory =  this.directory + '/app/components';
     var componentTemplateDirectory =  this.directory + '/app/templates/components';
-    return convertJSFiles(componentDirectory, componentJSFileConverter).
+    return convertFiles(componentDirectory, rootLevelFileConverter).
       then(function() {
-        return convertTemplatesFiles(componentTemplateDirectory, true);
+        return convertComponentTemplatesFiles(componentTemplateDirectory, true);
       });
   };
 
@@ -250,13 +301,26 @@ var Podify = (function() {
     var controllerDirectory =  appDirectory + '/controllers';
     var templateDirectory =  appDirectory + '/templates';
 
-    return convertJSFiles(routeDirectory, routeJSFileConverter).
+    return convertFiles(routeDirectory, rootLevelFileConverter).
       then(function() {
-        convertJSFiles(controllerDirectory, controllerJSFileConverter).
+        return convertFiles(controllerDirectory, rootLevelFileConverter).
           then(function() {
-            return convertTemplatesFiles(templateDirectory);
+            return convertFiles(templateDirectory, rootLevelFileConverter);
           });
       });
+  };
+
+  Podify.prototype.convertSubRoutesToPods = function() {
+    var appDirectory = this.directory + '/app';
+    var routeDirectory =  appDirectory + '/routes';
+    var controllerDirectory =  appDirectory + '/controllers';
+    var templateDirectory =  appDirectory + '/templates';
+
+    return convertSubDirectory(routeDirectory).then(function() {
+      return convertSubDirectory(controllerDirectory).then(function() {
+        return convertSubDirectory(templateDirectory);
+      });
+    });
   };
 
   return Podify;
